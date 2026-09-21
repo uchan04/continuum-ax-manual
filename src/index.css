@@ -1,0 +1,91 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+  --color-bg: #0a0b0d;
+  --color-surface: #111318;
+  --color-panel: #161820;
+  --color-border: #232530;
+  --color-border-bright: #2e3140;
+  --color-text-primary: #e8eaf0;
+  --color-text-secondary: #8b8fa8;
+  --color-text-dim: #555870;
+  --color-accent-red: #e53e3e;
+  --color-accent-red-hover: #c53030;
+  --color-accent-red-glow: rgba(229, 62, 62, 0.15);
+  --color-green: #22c55e;
+  --color-green-dim: rgba(34, 197, 94, 0.12);
+  --color-red: #ef4444;
+  --color-red-dim: rgba(239, 68, 68, 0.12);
+  --color-yellow: #eab308;
+  --color-yellow-dim: rgba(234, 179, 8, 0.12);
+  --color-blue: #3b82f6;
+  --color-blue-dim: rgba(59, 130, 246, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: #f0f2f7;
+  color: #111827;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #232530; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #2e3140; }
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(229, 62, 62, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(229, 62, 62, 0); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.terminal-line {
+  animation: fadeIn 0.3s ease forwards;
+}
+
+.cursor-blink {
+  animation: blink 1s step-end infinite;
+}
+
+.pulse-ring {
+  animation: pulse-red 2s ease-in-out infinite;
+}
+
+@keyframes pulse-orb {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.08); }
+}

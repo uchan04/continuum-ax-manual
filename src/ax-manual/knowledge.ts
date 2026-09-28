@@ -6,6 +6,8 @@ export interface Manual {
   genSeconds: number;
   sampleChars: number;
   fileNames: string[];
+  /** 브리핑 생성 입력용. 세션 메모리에만 두고 제출 기록에는 넣지 않는다. */
+  sample?: string;
 }
 
 export interface BriefingSection {
@@ -46,19 +48,17 @@ export function buildBriefing(manuals: Manual[], revokeRun: boolean): BriefingSe
     };
   });
 
-  if (!revokeRun) return fromManuals;
-
-  return [
-    ...fromManuals,
-    {
-      icon: "🔑",
-      title: "계정 · 권한 인계 현황",
-      body: "API 연동 앱은 차단 완료됐습니다. 폐쇄형 ERP는 RPA 옵션 대상이고, 그 외 계정은 수동 확인이 필요합니다.",
-      source: "Continuum 오프보딩 로그",
-      derivedFrom: "offboarding",
-    },
-  ];
+  return revokeRun ? [...fromManuals, ...accountSection] : fromManuals;
 }
+
+/** 계정 섹션은 LLM 이 아니라 오프보딩 로그에서 나온다 — 지어내면 안 되는 사실. */
+export const accountSection: BriefingSection[] = [{
+  icon: "🔑",
+  title: "계정 · 권한 인계 현황",
+  body: "API 연동 앱은 차단 완료됐습니다. 폐쇄형 ERP는 RPA 옵션 대상이고, 그 외 계정은 수동 확인이 필요합니다.",
+  source: "Continuum 오프보딩 로그",
+  derivedFrom: "offboarding",
+}];
 
 /** 축적이 없으면 브리핑을 만들 수 없다 — 이 제품의 전제. */
 export function canBrief(manuals: Manual[]): boolean {

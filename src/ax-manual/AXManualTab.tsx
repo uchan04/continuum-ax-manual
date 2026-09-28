@@ -1,6 +1,14 @@
 import { useState } from "react";
 import { missingFeedbackFields } from "./validation";
-import { buildBriefing, canBrief, type Manual } from "./knowledge";
+import { buildBriefing, canBrief, accountSection, type Manual, type BriefingSection } from "./knowledge";
+
+interface BriefCost {
+  krw: number;
+  promptTokens: number;
+  completionTokens: number;
+  model: string;
+  elapsedMs: number;
+}
 
 type SyncState = "idle" | "sending" | "sent" | "local-only" | "failed";
 /** 평상시 축적(1~3) → 퇴사 이벤트(4) → 피드백(5). 사업계획서 작동방식 순서 그대로. */
@@ -16,6 +24,11 @@ interface Submission {
   totalGenSeconds: number;
   revokeRun: boolean;
   briefingSections: number;
+  /** 실제 LLM 호출 원가. 사업계획서 8번 검증항목 ② (건당 692원 성립 여부). */
+  briefCostKrw: number | null;
+  briefModel: string | null;
+  briefPromptTokens: number | null;
+  briefCompletionTokens: number | null;
   starRating: number;
   searchTimeSaved: string | null;
   continueChoice: string | null;
@@ -75,6 +88,10 @@ export default function AXManualTab() {
   const [revokeStarted, setRevokeStarted] = useState(false);
   const [revokedCount, setRevokedCount] = useState(0);
   const [briefingReady, setBriefingReady] = useState(false);
+  const [briefing, setBriefing] = useState<BriefingSection[]>([]);
+  const [briefingState, setBriefingState] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [briefingError, setBriefingError] = useState<string | null>(null);
+  const [briefCost, setBriefCost] = useState<BriefCost | null>(null);
 
   // 피드백
   const [starRating, setStarRating] = useState(0);
@@ -93,7 +110,6 @@ export default function AXManualTab() {
     "매뉴얼을 완성하는 중...",
   ];
 
-  const briefing = buildBriefing(manuals, revokeStarted);
   const missingFields = missingFeedbackFields({ starRating, savedHours: searchTimeSaved, continueChoice, priceChoice });
   const canSubmit = missingFields.length === 0;
   const totalGenSeconds = Math.round(manuals.reduce((sum, m) => sum + m.genSeconds, 0) * 10) / 10;
@@ -137,6 +153,10 @@ export default function AXManualTab() {
       // 퇴사자 이름·근무일은 제3자 개인정보라 저장하지 않고 사용 여부만 남긴다.
       revokeRun: revokeStarted,
       briefingSections: briefing.length,
+      briefCostKrw: briefCost?.krw ?? null,
+      briefModel: briefCost?.model ?? null,
+      briefPromptTokens: briefCost?.promptTokens ?? null,
+      briefCompletionTokens: briefCost?.completionTokens ?? null,
       starRating, searchTimeSaved, continueChoice, priceChoice,
     };
     saveLocally(record);
@@ -178,6 +198,7 @@ export default function AXManualTab() {
           genSeconds: Math.round((Date.now() - start) / 100) / 10,
           sampleChars: uploadText.length,
           fileNames,
+          sample: uploadText,
         }]);
         setUploadText(""); setFileNames([]); setFileError(null);
         setTimeout(() => setPhase(3), 500);
@@ -186,6 +207,43 @@ export default function AXManualTab() {
       const newIdx = Math.floor((pct / 100) * LOADING_MSGS.length);
       if (newIdx !== msgIdx && newIdx < LOADING_MSGS.length) { msgIdx = newIdx; setLoadingMsg(LOADING_MSGS[msgIdx]); }
     }, 120);
+  };
+
+  // 축적된 매뉴얼을 서버로 보내 실제 LLM 으로 브리핑을 생성한다.
+  // 키는 서버에만 있으므로 여기서는 /api/brief 만 부른다.
+  const generateBriefing = async () => {
+    setBriefingReady(true);
+    setBriefingState("loading");
+    setBriefingError(null);
+    try {
+      const res = await fetch("/api/brief", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          successorRole,
+          manuals: manuals.map(m => ({ label: m.label, taskType: m.taskType, createdAt: m.createdAt, sample: m.sample })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `서버 오류 (${res.status})`);
+
+      const sections: BriefingSection[] = data.sections.map((s: { title: string; body: string; sourceLabel: string }) => ({
+        icon: "📌",
+        title: s.title,
+        body: s.body,
+        source: s.sourceLabel || "축적 매뉴얼",
+        derivedFrom: "manual" as const,
+      }));
+      setBriefing(revokeStarted ? [...sections, ...accountSection] : sections);
+      setBriefCost({ krw: data.usage.costKrw, promptTokens: data.usage.promptTokens, completionTokens: data.usage.completionTokens, model: data.model, elapsedMs: data.elapsedMs });
+      setBriefingState("done");
+    } catch (e) {
+      // 실패해도 데모가 멈추면 안 되므로 규칙 기반 브리핑으로 되돌린다.
+      setBriefing(buildBriefing(manuals, revokeStarted));
+      setBriefCost(null);
+      setBriefingError(e instanceof Error ? e.message : "알 수 없는 오류");
+      setBriefingState("error");
+    }
   };
 
   const runRevoke = () => {
@@ -207,6 +265,7 @@ export default function AXManualTab() {
     setManuals([]); setTaskType("cs"); setUploadText(""); setFileNames([]); setFileError(null);
     setLeaverName(""); setLastDay(""); setSuccessorRole("");
     setRevokeStarted(false); setRevokedCount(0); setBriefingReady(false);
+    setBriefing([]); setBriefingState("idle"); setBriefingError(null); setBriefCost(null);
     setStarRating(0); setSearchTimeSaved(null); setPriceChoice(null); setContinueChoice(null);
     setSubmitted(false); setSyncState("idle");
   };
@@ -504,7 +563,7 @@ export default function AXManualTab() {
 
           {/* 브리핑 */}
           {!briefingReady ? (
-            <button onClick={() => canBrief4 && setBriefingReady(true)} style={{
+            <button onClick={() => canBrief4 && generateBriefing()} style={{
               width: "100%", padding: "13px 0", borderRadius: 10, fontSize: 14, fontWeight: 700, border: "none",
               background: canBrief4 ? "linear-gradient(135deg,#6366f1,#818cf8)" : "#f3f4f6",
               color: canBrief4 ? "#fff" : "#9ca3af", cursor: canBrief4 ? "pointer" : "not-allowed",
@@ -515,12 +574,45 @@ export default function AXManualTab() {
               <h3 style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", margin: "0 0 10px", letterSpacing: "0.06em", textTransform: "uppercase" }}>
                 브리핑 · {successorRole} 인가 범위
               </h3>
-              <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 10, padding: "12px 14px", marginBottom: 12 }}>
-                <p style={{ fontSize: 12, color: "#4338ca", margin: 0, lineHeight: 1.7 }}>
-                  이 브리핑 {briefing.length}개 섹션 중 <strong>{briefing.filter(b => b.derivedFrom === "manual").length}개</strong>는
-                  평상시 축적한 매뉴얼에서 나왔습니다. 매뉴얼을 더 쌓으면 섹션이 늘어납니다.
-                </p>
-              </div>
+              {briefingState === "loading" && (
+                <div style={{ ...card, padding: "28px 24px", textAlign: "center", marginBottom: 12 }}>
+                  <div style={{ width: 36, height: 36, margin: "0 auto 12px", borderRadius: "50%", border: "3px solid #e5e7eb", borderTopColor: "#6366f1", animation: "spin 0.9s linear infinite" }} />
+                  <p style={{ fontSize: 13, color: "#6b7280", margin: 0 }}>축적된 매뉴얼 {manuals.length}건을 AI가 읽고 브리핑을 작성하는 중...</p>
+                </div>
+              )}
+
+              {briefingState === "error" && (
+                <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "12px 14px", marginBottom: 12 }}>
+                  <p style={{ fontSize: 12, color: "#991b1b", margin: 0, lineHeight: 1.7 }}>
+                    <strong>AI 호출 실패</strong> — {briefingError}<br />
+                    아래는 규칙 기반으로 생성한 대체 브리핑입니다. 원가 측정은 이번 건에서 불가합니다.
+                  </p>
+                </div>
+              )}
+
+              {briefingState === "done" && briefCost && (
+                <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "12px 14px", marginBottom: 12 }}>
+                  <p style={{ fontSize: 12, color: "#15803d", margin: "0 0 6px", fontWeight: 600 }}>이번 브리핑 실측 원가</p>
+                  <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 12, color: "#166534" }}>
+                    <span><strong>{briefCost.krw.toLocaleString()}원</strong> (건당)</span>
+                    <span>입력 {briefCost.promptTokens.toLocaleString()} · 출력 {briefCost.completionTokens.toLocaleString()} 토큰</span>
+                    <span>{(briefCost.elapsedMs / 1000).toFixed(1)}초</span>
+                  </div>
+                  <p style={{ fontSize: 10, color: "#16a34a", margin: "6px 0 0" }}>
+                    모델 {briefCost.model} · 사업계획서 기준 건당 설계 상한 5,000원
+                    {briefCost.krw === 0 && " · 무료 모델이라 0원으로 표시되며, 유료 모델 전환 시 실제 단가가 찍힙니다"}
+                  </p>
+                </div>
+              )}
+
+              {briefingState !== "loading" && briefing.length > 0 && (
+                <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 10, padding: "12px 14px", marginBottom: 12 }}>
+                  <p style={{ fontSize: 12, color: "#4338ca", margin: 0, lineHeight: 1.7 }}>
+                    이 브리핑 {briefing.length}개 섹션 중 <strong>{briefing.filter(b => b.derivedFrom === "manual").length}개</strong>는
+                    평상시 축적한 매뉴얼에서 나왔습니다. 매뉴얼을 더 쌓으면 섹션이 늘어납니다.
+                  </p>
+                </div>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
                 {briefing.map((b, i) => (
                   <div key={b.title} style={{ ...card, overflow: "hidden" }}>
@@ -546,7 +638,10 @@ export default function AXManualTab() {
               </div>
               <div style={{ display: "flex", gap: 10 }}>
                 <button onClick={() => setPhase(3)} style={{ padding: "12px 18px", borderRadius: 9, fontSize: 13, fontWeight: 500, border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", cursor: "pointer" }}>← 축적 현황</button>
-                <button onClick={() => setPhase(5)} style={{ flex: 1, padding: "12px 0", borderRadius: 9, fontSize: 14, fontWeight: 700, border: "none", background: "linear-gradient(135deg,#6366f1,#818cf8)", color: "#fff", cursor: "pointer", boxShadow: "0 4px 16px rgba(99,102,241,0.3)" }}>다음: 피드백 →</button>
+                <button onClick={() => briefingState !== "loading" && setPhase(5)} disabled={briefingState === "loading"} style={{ flex: 1, padding: "12px 0", borderRadius: 9, fontSize: 14, fontWeight: 700, border: "none",
+                  background: briefingState === "loading" ? "#f3f4f6" : "linear-gradient(135deg,#6366f1,#818cf8)",
+                  color: briefingState === "loading" ? "#9ca3af" : "#fff",
+                  cursor: briefingState === "loading" ? "not-allowed" : "pointer" }}>다음: 피드백 →</button>
               </div>
             </>
           )}

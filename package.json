@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types src/ax-manual/validation.test.ts && node --experimental-strip-types src/ax-manual/knowledge.test.ts"
+    "test": "node --experimental-strip-types src/ax-manual/validation.test.ts && node --experimental-strip-types src/ax-manual/knowledge.test.ts && node --experimental-strip-types api/brief.test.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

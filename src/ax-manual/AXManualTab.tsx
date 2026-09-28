@@ -1,6 +1,8 @@
 import { useState } from "react";
+import { missingFeedbackFields } from "./validation";
 
 type Mode = "manual" | "handover";
+type SyncState = "idle" | "sending" | "sent" | "local-only" | "failed";
 
 interface Submission {
   timestamp: string;
@@ -9,6 +11,7 @@ interface Submission {
   email: string;
   taskType: string;
   successorRole: string;
+  revokeRun: boolean;
   sampleChars: number;
   fileNames: string[];
   genSeconds: number;
@@ -36,6 +39,11 @@ export default function AXManualTab() {
   const [priceChoice, setPriceChoice] = useState<string | null>(null);
   const [continueChoice, setContinueChoice] = useState<string | null>(null);
   const [savedHours, setSavedHours] = useState<string | null>(null);
+  const [syncState, setSyncState] = useState<SyncState>("idle");
+  const [leaverName, setLeaverName] = useState("");
+  const [lastDay, setLastDay] = useState("");
+  const [revokeStarted, setRevokeStarted] = useState(false);
+  const [revokedCount, setRevokedCount] = useState(0);
   const [submitted, setSubmitted] = useState(false);
   const [genSeconds, setGenSeconds] = useState(0);
 
@@ -71,6 +79,45 @@ export default function AXManualTab() {
     { label: "데이터 분석 리포트", icon: "📊", prompt: "다음 데이터를 분석하고 실행 가능한 인사이트를 포함한 리포트를 작성해줘. 구성: 1) 핵심 요약 (3줄 이내) 2) 주요 트렌드 분석 3) 이상치 또는 주목할 포인트 4) 권장 액션 3가지.\n\n데이터: [데이터 붙여넣기]" },
   ];
 
+  const STORAGE_KEY = "ax_manual_submissions";
+
+  const saveLocally = (record: Submission) => {
+    try {
+      const prior: Submission[] = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+      localStorage.setItem(STORAGE_KEY, JSON.stringify([...prior, record]));
+    } catch { /* 시크릿 모드 등 localStorage 불가 — 웹훅 전송은 계속 시도 */ }
+  };
+
+  // 5곳의 응답을 한곳에 모으려면 수집 엔드포인트가 필요하다.
+  // .env 에 VITE_COLLECTOR_URL 을 넣으면 그쪽으로 전송하고, 없으면 로컬에만 남는다.
+  const sendToCollector = async (record: Submission): Promise<SyncState> => {
+    const url = import.meta.env.VITE_COLLECTOR_URL;
+    if (!url) return "local-only";
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // 구글 앱스스크립트·폼 웹훅은 프리플라이트를 막는 경우가 많아 no-cors 로 보낸다.
+        // 응답 본문을 읽을 수 없으므로 예외가 안 나면 성공으로 간주한다.
+        mode: "no-cors",
+        body: JSON.stringify(record),
+      });
+      return "sent";
+    } catch {
+      return "failed";
+    }
+  };
+
+  const exportSubmissions = () => {
+    const raw = localStorage.getItem(STORAGE_KEY) || "[]";
+    const blob = new Blob([raw], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `ax-submissions-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
   const MAX_FILE_BYTES = 1_000_000;
 
   const handleFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -86,6 +133,25 @@ export default function AXManualTab() {
     const chunks = await Promise.all(ok.map(async f => `--- ${f.name} ---\n${await f.text()}`));
     setUploadText(prev => [prev, ...chunks].filter(Boolean).join("\n\n"));
     setFileNames(prev => [...new Set([...prev, ...ok.map(f => f.name)])]);
+  };
+
+  // 사업계획서 작동방식 #2 — 퇴사 입력 시 계정 권한 연쇄 차단.
+  // API가 열린 앱은 자동 차단, 폐쇄형 ERP는 월 구독 RPA 옵션, 그 외는 수동.
+  const ACCOUNTS = [
+    { name: "이메일 · 캘린더", via: "auto" as const },
+    { name: "Slack", via: "auto" as const },
+    { name: "협업 도구 (문서·위키)", via: "auto" as const },
+    { name: "광고 플랫폼", via: "auto" as const },
+    { name: "이카운트 ERP", via: "rpa" as const },
+    { name: "사내 그룹웨어", via: "manual" as const },
+  ];
+
+  const runRevoke = () => {
+    setRevokeStarted(true);
+    ACCOUNTS.forEach((acc, i) => {
+      if (acc.via === "manual") return; // 수동 대상은 자동 처리하지 않는다
+      setTimeout(() => setRevokedCount(i + 1), 400 * (i + 1));
+    });
   };
 
   const BRIEFING_SECTIONS = [
@@ -114,20 +180,23 @@ export default function AXManualTab() {
     }, 120);
   };
 
-  const submitFeedback = () => {
-    if (starRating === 0) return;
+  const missingFields = missingFeedbackFields({ starRating, savedHours, continueChoice, priceChoice });
+  const canSubmit = missingFields.length === 0;
+
+  const submitFeedback = async () => {
+    if (!canSubmit) return;
     const record: Submission = {
       timestamp: new Date().toISOString(),
       mode, companyName, email, taskType, successorRole,
+      // 퇴사자 이름·근무일은 제3자 개인정보라 기록하지 않고, 기능 사용 여부만 남긴다.
+      revokeRun: revokeStarted,
       sampleChars: uploadText.length, fileNames,
       genSeconds, starRating, savedHours, continueChoice, priceChoice,
     };
-    try {
-      const key = "ax_manual_submissions";
-      const prior: Submission[] = JSON.parse(localStorage.getItem(key) || "[]");
-      localStorage.setItem(key, JSON.stringify([...prior, record]));
-    } catch { /* localStorage unavailable, skip persistence */ }
+    saveLocally(record);
     setSubmitted(true);
+    setSyncState("sending");
+    setSyncState(await sendToCollector(record));
   };
 
   const handleCopy = (idx: number, text: string) => {
@@ -160,7 +229,7 @@ export default function AXManualTab() {
 
   const s: React.CSSProperties = { height: "100%", overflowY: "auto", padding: "28px 32px", fontFamily: "Inter, system-ui, sans-serif" };
 
-  const canStart = Boolean(companyName && email && (mode === "manual" || successorRole));
+  const canStart = Boolean(companyName && email && (mode === "manual" || (successorRole && leaverName)));
 
   // ── Step 1 ─────────────────────────────────────────────────────────────────
   if (step === 1) return (
@@ -194,7 +263,7 @@ export default function AXManualTab() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
           {(mode === "handover"
             ? [{ value: "5시간", label: "수작업 대비 평균 절감(추정·검증전)" }, { value: "42%", label: "퇴사 시 증발하는 개인 고유 지식 비중" }, { value: genSeconds ? `${genSeconds}초` : "실측중", label: "이번 브리핑 생성 소요시간" }]
-            : [{ value: genSeconds ? `${genSeconds}초` : "실측중", label: "이번 매뉴얼 생성 소요시간" }, { value: "3배↑", label: "업무 처리 속도(추정·검증전)" }, { value: "4종", label: "생성 프롬프트 수" }]
+            : [{ value: genSeconds ? `${genSeconds}초` : "실측중", label: "이번 매뉴얼 생성 소요시간" }, { value: "미검증", label: "업무 처리 속도" }, { value: "4종", label: "생성 프롬프트 수" }]
           ).map(kpi => (
             <div key={kpi.label} style={{ background: "#fff", border: "1px solid #f0f0f5", borderRadius: 12, padding: "18px 20px", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" }}>
               <div style={{ fontSize: 22, fontWeight: 800, color: "#6366f1", marginBottom: 4 }}>{kpi.value}</div>
@@ -217,11 +286,25 @@ export default function AXManualTab() {
                 style={{ width: "100%", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 9, padding: "10px 13px", fontSize: 13, color: "#111827", outline: "none", boxSizing: "border-box", fontFamily: "Inter, sans-serif" }} />
             </div>
             {mode === "handover" && (
-              <div>
-                <label style={{ fontSize: 12, color: "#374151", fontWeight: 600, display: "block", marginBottom: 6 }}>후임자 직급/역할 *</label>
-                <input value={successorRole} onChange={e => setSuccessorRole(e.target.value)} placeholder="예: 신입 마케팅 매니저"
-                  style={{ width: "100%", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 9, padding: "10px 13px", fontSize: 13, color: "#111827", outline: "none", boxSizing: "border-box", fontFamily: "Inter, sans-serif" }} />
-              </div>
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <div>
+                    <label style={{ fontSize: 12, color: "#374151", fontWeight: 600, display: "block", marginBottom: 6 }}>퇴사자 이름 *</label>
+                    <input value={leaverName} onChange={e => setLeaverName(e.target.value)} placeholder="예: 김OO"
+                      style={{ width: "100%", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 9, padding: "10px 13px", fontSize: 13, color: "#111827", outline: "none", boxSizing: "border-box", fontFamily: "Inter, sans-serif" }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, color: "#374151", fontWeight: 600, display: "block", marginBottom: 6 }}>마지막 근무일 <span style={{ color: "#9ca3af", fontWeight: 400 }}>(선택)</span></label>
+                    <input type="date" value={lastDay} onChange={e => setLastDay(e.target.value)}
+                      style={{ width: "100%", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 9, padding: "10px 13px", fontSize: 13, color: "#111827", outline: "none", boxSizing: "border-box", fontFamily: "Inter, sans-serif" }} />
+                  </div>
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, color: "#374151", fontWeight: 600, display: "block", marginBottom: 6 }}>후임자 직급/역할 *</label>
+                  <input value={successorRole} onChange={e => setSuccessorRole(e.target.value)} placeholder="예: 신입 마케팅 매니저"
+                    style={{ width: "100%", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 9, padding: "10px 13px", fontSize: 13, color: "#111827", outline: "none", boxSizing: "border-box", fontFamily: "Inter, sans-serif" }} />
+                </div>
+              </>
             )}
             <div>
               <label style={{ fontSize: 12, color: "#374151", fontWeight: 600, display: "block", marginBottom: 8 }}>{mode === "handover" ? "퇴사자가 담당하던 업무 영역 *" : "가장 비효율적인 반복 업무 *"}</label>
@@ -269,7 +352,7 @@ export default function AXManualTab() {
             color: canStart ? "#fff" : "#9ca3af",
             border: "none", cursor: canStart ? "pointer" : "not-allowed",
             boxShadow: canStart ? "0 4px 16px rgba(99,102,241,0.3)" : "none", transition: "all 0.2s",
-          }}>{canStart ? (mode === "handover" ? "✦  AI 인수인계 브리핑 생성 시작" : "✦  AI 매뉴얼 생성 시작") : (mode === "handover" && companyName && email ? "후임자 직급을 입력해주세요" : "회사명과 이메일을 입력해주세요")}</button>
+          }}>{canStart ? (mode === "handover" ? "✦  AI 인수인계 브리핑 생성 시작" : "✦  AI 매뉴얼 생성 시작") : (mode === "handover" && companyName && email ? "퇴사자 이름과 후임자 직급을 입력해주세요" : "회사명과 이메일을 입력해주세요")}</button>
           <p style={{ fontSize: 11, color: "#9ca3af", textAlign: "center", margin: "8px 0 0" }}>무료 체험 · 신용카드 불필요 · 데이터는 분석 후 즉시 삭제</p>
         </div>
       </div>
@@ -358,6 +441,47 @@ export default function AXManualTab() {
 
         {mode === "handover" && (
           <>
+            <h3 style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", margin: "0 0 10px", letterSpacing: "0.06em", textTransform: "uppercase" }}>계정 · 권한 차단</h3>
+            <div style={{ background: "#fff", border: "1px solid #f0f0f5", borderRadius: 14, padding: "18px 20px", marginBottom: 18, boxShadow: "0 1px 4px rgba(0,0,0,0.06)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#111827" }}>{leaverName || "퇴사자"} 님의 계정 권한</div>
+                  <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+                    {lastDay ? `마지막 근무일 ${lastDay} 기준` : "마지막 근무일 미입력"} · 자동 차단 대상 {ACCOUNTS.filter(a => a.via !== "manual").length}건
+                  </div>
+                </div>
+                {!revokeStarted && (
+                  <button onClick={runRevoke} style={{ padding: "9px 18px", borderRadius: 9, fontSize: 13, fontWeight: 700, border: "none", cursor: "pointer", background: "#dc2626", color: "#fff", boxShadow: "0 4px 14px rgba(220,38,38,0.25)" }}>
+                    원클릭 권한 차단 실행
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {ACCOUNTS.map((acc, i) => {
+                  const done = revokeStarted && acc.via !== "manual" && revokedCount > i;
+                  const running = revokeStarted && acc.via !== "manual" && revokedCount === i;
+                  const badge = acc.via === "auto" ? "API 연동" : acc.via === "rpa" ? "RPA · 월 구독" : "수동 확인 필요";
+                  return (
+                    <div key={acc.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 8, background: done ? "#f0fdf4" : "#f9fafb", border: `1px solid ${done ? "#bbf7d0" : "#f0f0f5"}` }}>
+                      <span style={{ width: 16, textAlign: "center", fontSize: 12, color: done ? "#16a34a" : running ? "#6366f1" : "#d1d5db" }}>
+                        {done ? "✓" : running ? "●" : acc.via === "manual" ? "!" : "○"}
+                      </span>
+                      <span style={{ flex: 1, fontSize: 12, color: "#374151" }}>{acc.name}</span>
+                      <span style={{ fontSize: 10, color: acc.via === "manual" ? "#b45309" : "#6b7280", background: acc.via === "manual" ? "#fef3c7" : "#f3f4f6", border: `1px solid ${acc.via === "manual" ? "#fde68a" : "#e5e7eb"}`, borderRadius: 5, padding: "2px 7px" }}>{badge}</span>
+                      <span style={{ fontSize: 11, fontWeight: 600, width: 62, textAlign: "right", color: done ? "#16a34a" : running ? "#6366f1" : "#9ca3af" }}>
+                        {done ? "차단됨" : running ? "차단 중" : acc.via === "manual" ? "대기" : "미처리"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p style={{ fontSize: 10, color: "#9ca3af", margin: "12px 0 0", lineHeight: 1.6 }}>
+                PoC 시뮬레이션입니다. 실제 SaaS·ERP 계정은 차단되지 않으며, API 연동과 RPA는 유료 베타에서 제공됩니다.
+              </p>
+            </div>
+
             <h3 style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", margin: "0 0 10px", letterSpacing: "0.06em", textTransform: "uppercase" }}>브리핑 · 후임자 인가 범위 내</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
               {BRIEFING_SECTIONS.map((b, i) => (
@@ -413,14 +537,15 @@ export default function AXManualTab() {
         <h3 style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", margin: "0 0 10px", letterSpacing: "0.06em", textTransform: "uppercase" }}>Before / After 비교</h3>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 32 }}>
           <div style={{ background: "#fff", border: "1px solid #fecaca", borderRadius: 11, padding: 16 }}>
-            <div style={{ fontSize: 11, color: "#dc2626", fontWeight: 700, marginBottom: 8 }}>BEFORE — 수동 처리 (25분)</div>
+            <div style={{ fontSize: 11, color: "#dc2626", fontWeight: 700, marginBottom: 8 }}>BEFORE — 수동 처리</div>
             <p style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.7, margin: 0 }}>고객 문의 확인 → Slack 메시지 → 답변 초안 → 검토 → 수정 → 발송. 매번 양식이 달라 품질 편차 발생.</p>
           </div>
           <div style={{ background: "#fff", border: "1px solid #86efac", borderRadius: 11, padding: 16 }}>
-            <div style={{ fontSize: 11, color: "#16a34a", fontWeight: 700, marginBottom: 8 }}>AFTER — AI 지원 (3분)</div>
-            <p style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.7, margin: 0 }}>프롬프트에 문의 내용 붙여넣기 → AI 답변 초안 (30초) → 검토 및 발송. 일관된 품질, 89% 시간 단축.</p>
+            <div style={{ fontSize: 11, color: "#16a34a", fontWeight: 700, marginBottom: 8 }}>AFTER — AI 지원</div>
+            <p style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.7, margin: 0 }}>프롬프트에 문의 내용 붙여넣기 → AI 답변 초안 → 검토 및 발송. 일관된 품질로 표준화.</p>
           </div>
         </div>
+        <p style={{ fontSize: 10, color: "#9ca3af", margin: "-20px 0 32px" }}>단계 비교이며, 실제 소요 시간 차이는 아래 피드백에서 실측합니다.</p>
         </>
         )}
       </div>
@@ -495,11 +620,11 @@ export default function AXManualTab() {
               <button onClick={() => setStep(3)} style={{ padding: "12px 18px", borderRadius: 9, fontSize: 13, fontWeight: 500, border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", cursor: "pointer" }}>← 이전</button>
               <button onClick={submitFeedback} style={{
                 flex: 1, padding: "12px 0", borderRadius: 9, fontSize: 14, fontWeight: 700, border: "none",
-                cursor: starRating>0 ? "pointer" : "not-allowed",
-                background: starRating>0 ? "linear-gradient(135deg,#6366f1,#818cf8)" : "#f3f4f6",
-                color: starRating>0 ? "#fff" : "#9ca3af",
-                boxShadow: starRating>0 ? "0 4px 16px rgba(99,102,241,0.3)" : "none", transition: "all 0.2s",
-              }}>{starRating>0 ? "피드백 제출하기" : "별점을 선택해주세요"}</button>
+                cursor: canSubmit ? "pointer" : "not-allowed",
+                background: canSubmit ? "linear-gradient(135deg,#6366f1,#818cf8)" : "#f3f4f6",
+                color: canSubmit ? "#fff" : "#9ca3af",
+                boxShadow: canSubmit ? "0 4px 16px rgba(99,102,241,0.3)" : "none", transition: "all 0.2s",
+              }}>{canSubmit ? "피드백 제출하기" : `${missingFields.join(" · ")} 응답이 필요합니다`}</button>
             </div>
           </div>
         ) : (
@@ -510,9 +635,18 @@ export default function AXManualTab() {
             <div style={{ background: "#f3f4f6", borderRadius: 8, padding: "9px 14px", display: "inline-block", marginBottom: 18 }}>
               <span style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 13, color: "#6366f1" }}>{email || "user@company.com"}</span>
             </div>
-            <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+            {syncState !== "idle" && (
+              <p style={{ fontSize: 11, margin: "0 0 18px", color: syncState === "failed" ? "#dc2626" : "#9ca3af" }}>
+                {syncState === "sending" && "응답 전송 중..."}
+                {syncState === "sent" && "✓ 응답이 수집 서버로 전송됐습니다"}
+                {syncState === "local-only" && "이 브라우저에만 저장됨 · 수집 서버(VITE_COLLECTOR_URL) 미설정"}
+                {syncState === "failed" && "전송 실패 — 이 브라우저에는 저장됐습니다. 아래에서 내보내 주세요."}
+              </p>
+            )}
+            <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
               <button onClick={() => setStep(3)} style={{ padding: "9px 18px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer", background: "#f9fafb", border: "1px solid #e5e7eb", color: "#6b7280" }}>매뉴얼 다시 보기</button>
-              <button onClick={() => { setStep(1); setSubmitted(false); setStarRating(0); setPriceChoice(null); setContinueChoice(null); setSavedHours(null); setCompanyName(""); setEmail(""); setSuccessorRole(""); setUploadText(""); setFileNames([]); setFileError(null); setGenSeconds(0); }} style={{ padding: "9px 18px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", background: "linear-gradient(135deg,#6366f1,#818cf8)", border: "none", color: "#fff" }}>새 매뉴얼 생성</button>
+              <button onClick={exportSubmissions} style={{ padding: "9px 18px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer", background: "#f9fafb", border: "1px solid #e5e7eb", color: "#6b7280" }}>응답 내보내기 (JSON)</button>
+              <button onClick={() => { setStep(1); setSubmitted(false); setStarRating(0); setPriceChoice(null); setContinueChoice(null); setSavedHours(null); setCompanyName(""); setEmail(""); setSuccessorRole(""); setUploadText(""); setFileNames([]); setFileError(null); setGenSeconds(0); setSyncState("idle"); setLeaverName(""); setLastDay(""); setRevokeStarted(false); setRevokedCount(0); }} style={{ padding: "9px 18px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", background: "linear-gradient(135deg,#6366f1,#818cf8)", border: "none", color: "#fff" }}>새 매뉴얼 생성</button>
             </div>
           </div>
         )}

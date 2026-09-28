@@ -4,6 +4,8 @@
 
 export interface BriefRequest {
   successorRole: string;
+  /** 사업계획서 6번: 퇴사(인계) 또는 입사(인수). 기본은 퇴사. */
+  eventKind?: "leave" | "join";
   manuals: { label: string; taskType: string; createdAt: string; sample?: string }[];
 }
 
@@ -24,13 +26,15 @@ export interface BriefResult {
 const KRW_PER_USD = 1383.3;
 const DEFAULT_MODEL = "google/gemma-4-31b-it:free";
 
-const SYSTEM_PROMPT = `당신은 퇴사자의 업무를 후임자에게 인계하는 브리핑을 작성합니다.
+const systemPrompt = (kind: "leave" | "join") => `${kind === "join"
+  ? "당신은 신규 입사자가 맡게 될 업무의 온보딩 브리핑을 작성합니다."
+  : "당신은 퇴사자의 업무를 후임자에게 인계하는 브리핑을 작성합니다."}
 
 규칙:
 - 반드시 주어진 매뉴얼 목록에 근거해서만 작성하세요. 없는 사실을 지어내지 마세요.
 - 매뉴얼 1건당 섹션 1개를 만드세요. 매뉴얼 수와 섹션 수가 같아야 합니다.
-- 후임자의 직급/역할에 맞춰 설명 수준을 조절하세요.
-- 각 섹션 body는 2~4문장의 한국어로, 후임자가 당장 해야 할 일이 드러나게 쓰세요.
+- 담당자의 직급/역할에 맞춰 설명 수준을 조절하세요.
+- 각 섹션 body는 2~4문장의 한국어로, 담당자가 당장 해야 할 일이 드러나게 쓰세요.
 - 개인 연락처나 민감정보는 쓰지 마세요.
 
 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트를 붙이지 마세요.
@@ -48,12 +52,13 @@ function buildUserPrompt(req: BriefRequest): string {
     })
     .join("\n");
 
-  return `후임자: ${req.successorRole}
+  const join = req.eventKind === "join";
+  return `${join ? "입사자" : "후임자"}: ${req.successorRole}
 
 축적된 매뉴얼 ${req.manuals.length}건:
 ${list}
 
-위 ${req.manuals.length}건 각각에 대해 인계 섹션을 작성하세요.`;
+위 ${req.manuals.length}건 각각에 대해 ${join ? "온보딩" : "인계"} 섹션을 작성하세요.`;
 }
 
 /** 모델이 코드펜스나 설명을 붙여도 JSON 을 건져낸다. */
@@ -79,7 +84,7 @@ function parseSections(content: string): BriefSection[] {
 
 export async function handleBrief(req: BriefRequest, apiKey: string, model = DEFAULT_MODEL): Promise<BriefResult> {
   if (!req.manuals?.length) throw new Error("축적된 매뉴얼이 없으면 브리핑을 만들 수 없습니다.");
-  if (!req.successorRole?.trim()) throw new Error("후임자 직급이 필요합니다.");
+  if (!req.successorRole?.trim()) throw new Error("담당자 직급이 필요합니다.");
 
   const started = Date.now();
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -92,7 +97,7 @@ export async function handleBrief(req: BriefRequest, apiKey: string, model = DEF
     body: JSON.stringify({
       model,
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: systemPrompt(req.eventKind ?? "leave") },
         { role: "user", content: buildUserPrompt(req) },
       ],
       // 사업계획서 10번: 토큰 예산 상한을 코드로 강제한다.

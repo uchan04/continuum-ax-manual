@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { missingFeedbackFields } from "./validation";
-import { buildBriefing, canBrief, accountSection, type Manual, type BriefingSection } from "./knowledge";
+import { buildBriefing, canBrief, accountSection, type Manual, type BriefingSection, type EventKind } from "./knowledge";
 
 interface BriefCost {
   krw: number;
@@ -19,6 +19,8 @@ interface Submission {
   companyName: string;
   email: string;
   successorRole: string;
+  /** 사업계획서 6번: 퇴사(차단) 또는 입사(발급). 어느 쪽으로 검증했는지 남긴다. */
+  eventKind: EventKind;
   manualCount: number;
   manualTypes: string[];
   totalGenSeconds: number;
@@ -53,7 +55,25 @@ const PROMPT_BY_TASK: Record<string, { icon: string; prompt: string }> = {
   report: { icon: "📈", prompt: "다음 내용을 정기 보고서 형식으로 정리해줘. 구성: 1) 기간 내 주요 성과 2) 진행 중 과제와 현황 3) 리스크 4) 다음 기간 계획.\n\n내용: [보고 내용 붙여넣기]" },
 };
 
-// 사업계획서 작동방식 #2 — API가 열린 앱은 자동, 폐쇄형 ERP는 RPA, 그 외는 수동.
+// 사업계획서 6번 ② — 퇴사는 권한 차단, 입사는 권한 발급. 축적된 매뉴얼은 양쪽이 공유한다.
+const EVENT_COPY = {
+  leave: {
+    tab: "퇴사 · 인사이동", heading: "퇴사 · 인사이동 처리",
+    person: "퇴사자 이름", personPh: "예: 김OO",
+    dateLabel: "마지막 근무일", dateNote: "마지막 근무일",
+    roleLabel: "후임자 직급/역할", rolePh: "예: 신입 마케팅 매니저",
+    act: "차단", manualNote: "수동 확인 필요", brief: "인수인계",
+  },
+  join: {
+    tab: "신규 입사", heading: "신규 입사 처리",
+    person: "입사자 이름", personPh: "예: 박OO",
+    dateLabel: "입사일", dateNote: "입사일",
+    roleLabel: "담당 직급/역할", rolePh: "예: 신입 CS 매니저",
+    act: "발급", manualNote: "수동 개설 필요", brief: "온보딩",
+  },
+} as const;
+
+// API가 열린 앱은 자동, 폐쇄형 ERP는 RPA, 그 외는 수동.
 const ACCOUNTS = [
   { name: "이메일 · 캘린더", via: "auto" as const },
   { name: "Slack", via: "auto" as const },
@@ -81,7 +101,8 @@ export default function AXManualTab() {
   const [loadingMsg, setLoadingMsg] = useState("");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // 퇴사 이벤트
+  // 퇴사 · 입사 이벤트
+  const [eventKind, setEventKind] = useState<EventKind>("leave");
   const [leaverName, setLeaverName] = useState("");
   const [lastDay, setLastDay] = useState("");
   const [successorRole, setSuccessorRole] = useState("");
@@ -110,6 +131,9 @@ export default function AXManualTab() {
     "매뉴얼을 완성하는 중...",
   ];
 
+  const copyFor = EVENT_COPY[eventKind];
+  // 검증 응답에 다시 연락해야 하므로 형식이 깨진 메일은 시작 단계에서 막는다.
+  const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
   const missingFields = missingFeedbackFields({ starRating, savedHours: searchTimeSaved, continueChoice, priceChoice });
   const canSubmit = missingFields.length === 0;
   const totalGenSeconds = Math.round(manuals.reduce((sum, m) => sum + m.genSeconds, 0) * 10) / 10;
@@ -146,7 +170,7 @@ export default function AXManualTab() {
     if (!canSubmit) return;
     const record: Submission = {
       timestamp: new Date().toISOString(),
-      companyName, email, successorRole,
+      companyName, email, successorRole, eventKind,
       manualCount: manuals.length,
       manualTypes: manuals.map(m => m.taskType),
       totalGenSeconds,
@@ -220,7 +244,7 @@ export default function AXManualTab() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          successorRole,
+          successorRole, eventKind,
           manuals: manuals.map(m => ({ label: m.label, taskType: m.taskType, createdAt: m.createdAt, sample: m.sample })),
         }),
       });
@@ -234,12 +258,12 @@ export default function AXManualTab() {
         source: s.sourceLabel || "축적 매뉴얼",
         derivedFrom: "manual" as const,
       }));
-      setBriefing(revokeStarted ? [...sections, ...accountSection] : sections);
+      setBriefing(revokeStarted ? [...sections, ...accountSection(eventKind)] : sections);
       setBriefCost({ krw: data.usage.costKrw, promptTokens: data.usage.promptTokens, completionTokens: data.usage.completionTokens, model: data.model, elapsedMs: data.elapsedMs });
       setBriefingState("done");
     } catch (e) {
       // 실패해도 데모가 멈추면 안 되므로 규칙 기반 브리핑으로 되돌린다.
-      setBriefing(buildBriefing(manuals, revokeStarted));
+      setBriefing(buildBriefing(manuals, revokeStarted, eventKind));
       setBriefCost(null);
       setBriefingError(e instanceof Error ? e.message : "알 수 없는 오류");
       setBriefingState("error");
@@ -263,7 +287,7 @@ export default function AXManualTab() {
   const resetAll = () => {
     setPhase(1); setCompanyName(""); setEmail("");
     setManuals([]); setTaskType("cs"); setUploadText(""); setFileNames([]); setFileError(null);
-    setLeaverName(""); setLastDay(""); setSuccessorRole("");
+    setEventKind("leave"); setLeaverName(""); setLastDay(""); setSuccessorRole("");
     setRevokeStarted(false); setRevokedCount(0); setBriefingReady(false);
     setBriefing([]); setBriefingState("idle"); setBriefingError(null); setBriefCost(null);
     setStarRating(0); setSearchTimeSaved(null); setPriceChoice(null); setContinueChoice(null);
@@ -279,7 +303,7 @@ export default function AXManualTab() {
   const Timeline = () => {
     const stages = [
       { at: [1, 2, 3] as Phase[], label: "평상시 · 지식 축적", note: manuals.length > 0 ? `매뉴얼 ${manuals.length}건` : "매뉴얼 0건" },
-      { at: [4] as Phase[], label: "이벤트 · 퇴사 인수인계", note: briefingReady ? `브리핑 ${briefing.length}개 섹션` : "미발생" },
+      { at: [4] as Phase[], label: `이벤트 · ${copyFor.brief}`, note: briefingReady ? `브리핑 ${briefing.length}개 섹션` : "미발생" },
       { at: [5] as Phase[], label: "피드백", note: submitted ? "제출 완료" : "대기" },
     ];
     return (
@@ -306,7 +330,10 @@ export default function AXManualTab() {
   // ── 1. 매뉴얼 작성 입력 ────────────────────────────────────────────────────
   if (phase === 1) {
     const first = manuals.length === 0;
-    const canStart = Boolean(companyName && email);
+    const canStart = Boolean(companyName.trim()) && emailOk;
+    const startLabel = !companyName.trim() ? "회사명을 입력해주세요"
+      : !emailOk ? "업무용 이메일을 정확히 입력해주세요"
+      : "✦  매뉴얼 생성";
     return (
       <div style={s}>
         <div style={{ maxWidth: 760, margin: "0 auto" }}>
@@ -338,7 +365,8 @@ export default function AXManualTab() {
                   </div>
                   <div>
                     <label style={label}>업무용 이메일 *</label>
-                    <input value={email} onChange={e => setEmail(e.target.value)} placeholder="name@company.com" style={input} />
+                    <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="name@company.com"
+                      style={{ ...input, borderColor: email && !emailOk ? "#fca5a5" : "#e5e7eb" }} />
                   </div>
                 </>
               )}
@@ -391,7 +419,7 @@ export default function AXManualTab() {
                 background: canStart ? "linear-gradient(135deg,#6366f1,#818cf8)" : "#f3f4f6",
                 color: canStart ? "#fff" : "#9ca3af", cursor: canStart ? "pointer" : "not-allowed",
                 boxShadow: canStart ? "0 4px 16px rgba(99,102,241,0.3)" : "none",
-              }}>{canStart ? "✦  매뉴얼 생성" : "회사명과 이메일을 입력해주세요"}</button>
+              }}>{startLabel}</button>
             </div>
             <p style={{ fontSize: 11, color: "#9ca3af", textAlign: "center", margin: "8px 0 0" }}>첫 매뉴얼 무료 · 신용카드 불필요 · 샘플 원문은 저장하지 않습니다</p>
           </div>
@@ -484,16 +512,16 @@ export default function AXManualTab() {
         </div>
 
         <div style={{ ...card, padding: "20px 22px", borderColor: "#fde68a", background: "#fffbeb" }}>
-          <h3 style={{ fontSize: 14, fontWeight: 700, color: "#92400e", margin: "0 0 6px" }}>퇴사 · 인사이동이 발생했다면</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 700, color: "#92400e", margin: "0 0 6px" }}>퇴사 · 인사이동 · 신규 입사가 발생했다면</h3>
           <p style={{ fontSize: 12, color: "#92400e", margin: "0 0 14px", lineHeight: 1.7 }}>
-            지금 축적된 <strong>{manuals.length}건</strong>의 매뉴얼에서 후임자 맞춤 브리핑이 생성됩니다.
+            지금 축적된 <strong>{manuals.length}건</strong>의 매뉴얼에서 담당자 맞춤 브리핑이 생성됩니다.
             축적이 많을수록 브리핑이 촘촘해집니다.
           </p>
           <button onClick={() => setPhase(4)} disabled={!canBrief(manuals)} style={{
             padding: "11px 22px", borderRadius: 9, fontSize: 13, fontWeight: 700, border: "none",
             background: canBrief(manuals) ? "#dc2626" : "#e5e7eb", color: canBrief(manuals) ? "#fff" : "#9ca3af",
             cursor: canBrief(manuals) ? "pointer" : "not-allowed",
-          }}>퇴사 이벤트 입력 →</button>
+          }}>인사 이벤트 입력 →</button>
         </div>
         <div style={{ height: 32 }} />
       </div>
@@ -507,37 +535,49 @@ export default function AXManualTab() {
       <div style={s}>
         <div style={{ maxWidth: 760, margin: "0 auto" }}>
           <Timeline />
-          <h2 style={{ fontSize: 18, fontWeight: 700, color: "#111827", margin: "0 0 4px" }}>퇴사 · 인사이동 처리</h2>
-          <p style={{ fontSize: 13, color: "#6b7280", margin: "0 0 20px" }}>계정 권한을 차단하고, 축적된 매뉴얼에서 브리핑을 생성합니다.</p>
+          <h2 style={{ fontSize: 18, fontWeight: 700, color: "#111827", margin: "0 0 4px" }}>{copyFor.heading}</h2>
+          <p style={{ fontSize: 13, color: "#6b7280", margin: "0 0 20px" }}>계정 권한을 {copyFor.act}하고, 축적된 매뉴얼에서 브리핑을 생성합니다.</p>
 
           <div style={{ ...card, padding: "22px 24px", marginBottom: 16 }}>
+            <label style={label}>이벤트 종류 *</label>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
+              {(["leave", "join"] as EventKind[]).map(k => (
+                <button key={k} onClick={() => !revokeStarted && !briefingReady && setEventKind(k)} disabled={revokeStarted || briefingReady} style={{
+                  padding: "10px 12px", borderRadius: 9, fontSize: 12, fontWeight: 600, border: "1.5px solid",
+                  cursor: revokeStarted || briefingReady ? "not-allowed" : "pointer",
+                  background: eventKind === k ? "#eef2ff" : "#f9fafb",
+                  borderColor: eventKind === k ? "#6366f1" : "#e5e7eb",
+                  color: eventKind === k ? "#6366f1" : "#9ca3af",
+                }}>{eventKind === k ? "● " : "○ "}{EVENT_COPY[k].tab} · 권한 {EVENT_COPY[k].act}</button>
+              ))}
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
               <div>
-                <label style={label}>퇴사자 이름 *</label>
-                <input value={leaverName} onChange={e => setLeaverName(e.target.value)} placeholder="예: 김OO" style={input} />
+                <label style={label}>{copyFor.person} *</label>
+                <input value={leaverName} onChange={e => setLeaverName(e.target.value)} placeholder={copyFor.personPh} style={input} />
               </div>
               <div>
-                <label style={label}>마지막 근무일 <span style={{ color: "#9ca3af", fontWeight: 400 }}>(선택)</span></label>
+                <label style={label}>{copyFor.dateLabel} <span style={{ color: "#9ca3af", fontWeight: 400 }}>(선택)</span></label>
                 <input type="date" value={lastDay} onChange={e => setLastDay(e.target.value)} style={input} />
               </div>
             </div>
             <div>
-              <label style={label}>후임자 직급/역할 * <span style={{ color: "#9ca3af", fontWeight: 400 }}>— 이 직급의 인가 범위로 브리핑이 필터링됩니다</span></label>
-              <input value={successorRole} onChange={e => setSuccessorRole(e.target.value)} placeholder="예: 신입 마케팅 매니저" style={input} />
+              <label style={label}>{copyFor.roleLabel} * <span style={{ color: "#9ca3af", fontWeight: 400 }}>— 이 직급의 인가 범위로 브리핑이 필터링됩니다</span></label>
+              <input value={successorRole} onChange={e => setSuccessorRole(e.target.value)} placeholder={copyFor.rolePh} style={input} />
             </div>
           </div>
 
-          {/* 계정 권한 차단 */}
-          <h3 style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", margin: "0 0 10px", letterSpacing: "0.06em", textTransform: "uppercase" }}>계정 · 권한 차단</h3>
+          {/* 계정 권한 처리 */}
+          <h3 style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", margin: "0 0 10px", letterSpacing: "0.06em", textTransform: "uppercase" }}>계정 · 권한 {copyFor.act}</h3>
           <div style={{ ...card, padding: "18px 20px", marginBottom: 18 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
               <div style={{ fontSize: 12, color: "#6b7280" }}>
-                {lastDay ? `마지막 근무일 ${lastDay} 기준` : "마지막 근무일 미입력"} · 자동 차단 대상 {ACCOUNTS.filter(a => a.via !== "manual").length}건
+                {lastDay ? `${copyFor.dateNote} ${lastDay} 기준` : `${copyFor.dateNote} 미입력`} · 자동 {copyFor.act} 대상 {ACCOUNTS.filter(a => a.via !== "manual").length}건
               </div>
               {!revokeStarted && (
                 <button onClick={runRevoke} disabled={!leaverName} style={{ padding: "9px 18px", borderRadius: 9, fontSize: 13, fontWeight: 700, border: "none",
-                  background: leaverName ? "#dc2626" : "#e5e7eb", color: leaverName ? "#fff" : "#9ca3af", cursor: leaverName ? "pointer" : "not-allowed" }}>
-                  원클릭 권한 차단 실행
+                  background: leaverName ? (eventKind === "leave" ? "#dc2626" : "#16a34a") : "#e5e7eb", color: leaverName ? "#fff" : "#9ca3af", cursor: leaverName ? "pointer" : "not-allowed" }}>
+                  원클릭 권한 {copyFor.act} 실행
                 </button>
               )}
             </div>
@@ -545,19 +585,19 @@ export default function AXManualTab() {
               {ACCOUNTS.map((acc, i) => {
                 const done = revokeStarted && acc.via !== "manual" && revokedCount > i;
                 const running = revokeStarted && acc.via !== "manual" && revokedCount === i;
-                const badge = acc.via === "auto" ? "API 연동" : acc.via === "rpa" ? "RPA · 월 구독" : "수동 확인 필요";
+                const badge = acc.via === "auto" ? "API 연동" : acc.via === "rpa" ? "RPA · 월 구독" : copyFor.manualNote;
                 return (
                   <div key={acc.name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 8, background: done ? "#f0fdf4" : "#f9fafb", border: `1px solid ${done ? "#bbf7d0" : "#f0f0f5"}` }}>
                     <span style={{ width: 16, textAlign: "center", fontSize: 12, color: done ? "#16a34a" : running ? "#6366f1" : "#d1d5db" }}>{done ? "✓" : running ? "●" : acc.via === "manual" ? "!" : "○"}</span>
                     <span style={{ flex: 1, fontSize: 12, color: "#374151" }}>{acc.name}</span>
                     <span style={{ fontSize: 10, color: acc.via === "manual" ? "#b45309" : "#6b7280", background: acc.via === "manual" ? "#fef3c7" : "#f3f4f6", border: `1px solid ${acc.via === "manual" ? "#fde68a" : "#e5e7eb"}`, borderRadius: 5, padding: "2px 7px" }}>{badge}</span>
-                    <span style={{ fontSize: 11, fontWeight: 600, width: 62, textAlign: "right", color: done ? "#16a34a" : running ? "#6366f1" : "#9ca3af" }}>{done ? "차단됨" : running ? "차단 중" : acc.via === "manual" ? "대기" : "미처리"}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, width: 62, textAlign: "right", color: done ? "#16a34a" : running ? "#6366f1" : "#9ca3af" }}>{done ? `${copyFor.act}됨` : running ? `${copyFor.act} 중` : acc.via === "manual" ? "대기" : "미처리"}</span>
                   </div>
                 );
               })}
             </div>
             <p style={{ fontSize: 10, color: "#9ca3af", margin: "12px 0 0", lineHeight: 1.6 }}>
-              PoC 시뮬레이션입니다. 실제 SaaS·ERP 계정은 차단되지 않으며, API 연동과 RPA는 유료 베타에서 제공됩니다.
+              PoC 시뮬레이션입니다. 실제 SaaS·ERP 계정은 {copyFor.act}되지 않으며, API 연동과 RPA는 유료 베타에서 제공됩니다.
             </p>
           </div>
 
@@ -568,11 +608,11 @@ export default function AXManualTab() {
               background: canBrief4 ? "linear-gradient(135deg,#6366f1,#818cf8)" : "#f3f4f6",
               color: canBrief4 ? "#fff" : "#9ca3af", cursor: canBrief4 ? "pointer" : "not-allowed",
               boxShadow: canBrief4 ? "0 4px 16px rgba(99,102,241,0.3)" : "none",
-            }}>{canBrief4 ? `✦  축적된 매뉴얼 ${manuals.length}건에서 브리핑 생성` : "퇴사자 이름과 후임자 직급을 입력해주세요"}</button>
+            }}>{canBrief4 ? `✦  축적된 매뉴얼 ${manuals.length}건에서 ${copyFor.brief} 브리핑 생성` : `${copyFor.person}과 ${copyFor.roleLabel}을 입력해주세요`}</button>
           ) : (
             <>
               <h3 style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", margin: "0 0 10px", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-                브리핑 · {successorRole} 인가 범위
+{copyFor.brief} 브리핑 · {successorRole} 인가 범위
               </h3>
               {briefingState === "loading" && (
                 <div style={{ ...card, padding: "28px 24px", textAlign: "center", marginBottom: 12 }}>

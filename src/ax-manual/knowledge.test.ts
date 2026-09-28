@@ -21,11 +21,21 @@ assert.equal(sections.every(s => s.derivedFrom === "manual"), true);
 assert.match(sections[0].source, /CS 응대 매뉴얼/);
 assert.match(sections[1].source, /데이터 분석 매뉴얼/);
 
-// 권한 차단을 실행했을 때만 계정 섹션이 붙는다.
-assert.equal(buildBriefing(two, false).some(s => s.derivedFrom === "offboarding"), false);
-assert.equal(buildBriefing(two, true).some(s => s.derivedFrom === "offboarding"), true);
+// 계정 처리를 실행했을 때만 계정 섹션이 붙는다.
+assert.equal(buildBriefing(two, false).some(s => s.derivedFrom === "account"), false);
+assert.equal(buildBriefing(two, true).some(s => s.derivedFrom === "account"), true);
 
 // 알 수 없는 업무 유형도 섹션은 생성되어야 한다 (빠뜨리면 인계 누락).
 assert.equal(buildBriefing([manual("unknown", "기타")], false).length, 1);
+
+// 입사(권한 발급)도 같은 축적을 쓰지만 차단 문구가 새어나오면 안 된다.
+const join = buildBriefing(two, true, "join");
+assert.equal(join.length, 3);
+const joinAccount = join.at(-1)!;
+assert.match(joinAccount.title, /발급/);
+assert.doesNotMatch(joinAccount.body, /차단/);
+assert.match(joinAccount.source, /온보딩/);
+assert.match(join[0].title, /인수/);
+assert.match(buildBriefing(two, true, "leave").at(-1)!.body, /차단/);
 
 console.log("knowledge: 모든 검사 통과");

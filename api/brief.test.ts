@@ -10,12 +10,18 @@ const req: BriefRequest = {
 
 const originalFetch = globalThis.fetch;
 
+/** 마지막으로 OpenRouter 에 보낸 요청 본문. 프롬프트 검사용. */
+let sentBody: { messages: { role: string; content: string }[] };
+
 /** OpenRouter 응답을 흉내낸다. */
 function mockFetch(content: string, usage = { prompt_tokens: 500, completion_tokens: 200, cost: 0.0004 }) {
-  globalThis.fetch = (async () => new Response(
-    JSON.stringify({ choices: [{ message: { content } }], usage, model: "test-model" }),
-    { status: 200, headers: { "Content-Type": "application/json" } },
-  )) as typeof fetch;
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    sentBody = JSON.parse(String(init.body));
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content } }], usage, model: "test-model" }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as unknown as typeof fetch;
 }
 
 try {
@@ -48,6 +54,15 @@ try {
   mockFetch('{"sections":[{"title":"A","body":"본문","sourceLabel":"S"}]}', { prompt_tokens: 10, completion_tokens: 5, cost: 0 });
   r = await handleBrief(req, "test-key");
   assert.equal(r.usage.costKrw, 0);
+
+  // 입사(join)면 프롬프트가 온보딩으로 바뀌어야 한다 — 안 바뀌면 입사자에게 "인계" 브리핑이 간다.
+  mockFetch('{"sections":[{"title":"A","body":"본문","sourceLabel":"S"}]}');
+  await handleBrief({ ...req, eventKind: "join" }, "test-key");
+  assert.match(sentBody.messages[0].content, /온보딩/);
+  assert.match(sentBody.messages[1].content, /입사자/);
+
+  await handleBrief(req, "test-key");   // eventKind 생략 시 기본은 퇴사
+  assert.match(sentBody.messages[0].content, /퇴사자/);
 
   // JSON 이 아예 없으면 에러로 알린다 (조용히 빈 브리핑을 내면 안 됨).
   mockFetch("죄송합니다, 생성할 수 없습니다.");
